@@ -262,7 +262,7 @@ void print_aucont_usage_string() {
 int main(int argc, char *argv[]) {
     if (argc < 2) {
         print_aucont_usage_string();
-        return INVALID_ARGS_ERR;
+        return INVALID_ARGS_ERROR;
     }
 
     std::string cmd(argv[1]);
@@ -283,5 +283,5 @@ int main(int argc, char *argv[]) {
 
     std::cerr << "command \"" << cmd << "\" not found" << std::endl;
     print_aucont_usage_string();
-    return INVALID_ARGS_ERR;
+    return INVALID_ARGS_ERROR;
 }

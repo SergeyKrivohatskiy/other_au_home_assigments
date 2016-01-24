@@ -1,6 +1,6 @@
 CC=g++
 CFLAGS=-c -Wall --std=c++11
-LDFLAGS=
+LDFLAGS=-lpthread
 SOURCES=main.cpp aucont.cpp
 OBJECTS=$(SOURCES:.cpp=.o)
 EXECUTABLE=aucont
@@ -8,7 +8,7 @@ EXECUTABLE=aucont
 all: $(SOURCES) $(EXECUTABLE)
     
 $(EXECUTABLE): $(OBJECTS) 
-	$(CC) $(LDFLAGS) $(OBJECTS) -o $@
+	$(CC) $(OBJECTS) -o $@ $(LDFLAGS)
 
 .cpp.o:
 	$(CC) $(CFLAGS) $< -o $@
