@@ -5,8 +5,10 @@
 #include <arpa/inet.h>
 #include <sys/types.h>
 #include <semaphore.h>
+#include <assert.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <signal.h>
 #include <fcntl.h>
 #include <vector>
 #include <memory>
@@ -29,7 +31,7 @@ private:
     std::string what_str;
 };
 
-static char const *SEM_NAME = "/aucont_pids_storage_semaphore";
+static char const *SEM_NAME = "/aucont_pids_storage_sem";
 static char const *PIDS_FILE_NAME = "aucont_pids";
 
 sem_t* lock(sem_t *sem) {
@@ -68,7 +70,13 @@ public:
         file.seekp(0L, std::ios_base::end).write(reinterpret_cast<char*>(&pid), sizeof(int)).flush();
     }
 
-    bool remove(int pid) {
+    bool remove_by_idx(size_t id) {
+        std::unique_ptr<sem_t, void (*)(sem_t*)> guard(lock(sem), unlock);
+        return remove_by_idx_unsafe(id, pids_count());
+    }
+
+    // Warn: complexity is O(n)
+    bool remove_by_pid(int pid) {
         std::unique_ptr<sem_t, void (*)(sem_t*)> guard(lock(sem), unlock);
         size_t count = pids_count();
         size_t pos_found = 0;
@@ -85,12 +93,7 @@ public:
             return false;
         }
 
-        file.seekg(sizeof(int), std::ios_base::end).read(reinterpret_cast<char*>(&pid), sizeof(int));
-        file.seekp(pos_found * sizeof(int), std::ios_base::beg).
-                write(reinterpret_cast<char*>(&pid), sizeof(int)).flush();
-
-        truncate(PIDS_FILE_NAME, (count - 1) * sizeof(int));
-        return true;
+        return remove_by_idx_unsafe(pos_found, count);
     }
 
     bool get_pid(size_t idx, int &pid) {
@@ -104,7 +107,23 @@ public:
     }
 
 private:
+    bool remove_by_idx_unsafe(size_t idx, size_t count)
+    {
+        if (idx >= count) {
+            return false;
+        }
+        int pid;
+        file.seekg(sizeof(int), std::ios_base::end).read(reinterpret_cast<char*>(&pid), sizeof(int));
+        file.seekp(idx * sizeof(int), std::ios_base::beg).
+                write(reinterpret_cast<char*>(&pid), sizeof(int)).flush();
+
+        bool tr_succ = truncate(PIDS_FILE_NAME, (count - 1) * sizeof(int)) == 0;
+        assert(tr_succ);
+        return true;
+    }
+
     size_t pids_count() {
+        file.clear();
         return static_cast<size_t>(file.seekg(0L, std::ios_base::end).tellg() / sizeof(int));
     }
 
@@ -121,6 +140,15 @@ std::string to_string(in_addr_t ip) {
     char buffer[INET_ADDRSTRLEN + 1];
     inet_ntop(AF_INET, &ip, buffer, INET_ADDRSTRLEN);
     return buffer;
+}
+
+bool process_exist(int pid) {
+    // man kill
+    // If sig is 0, then no signal is sent,
+    // but error checking is still performed;
+    // this can be used to check for the
+    // existence of a process ID or process group ID.
+    return kill(pid, 0) == 0;
 }
 
 int aucont_start(start_arguments const &args) {
@@ -163,11 +191,22 @@ int aucont_stop(const stop_arguments &args) {
         }
         pids_storage pids;
 
-        bool removed = pids.remove(args.pid);
-        if (args.debug_enabled) {
-            printDebug() << "PID is " << (removed ? "" : "not ") << "removed from pids" << std::endl;
+        bool removed = pids.remove_by_pid(args.pid);
+        bool p_exist = process_exist(args.pid);
+        if (removed && p_exist) {
+            bool signal_sent = kill(args.pid, args.signal);
+            std::cout << "Signal " << args.signal << (signal_sent ? " was " : " wasn't ")
+                      << "sent to process with pid " << args.pid << std::endl;
+        } else {
+            std::cout << "Signal won't be sent to process with pid "
+                      << args.pid << " because" << std::endl;
+            if (!removed) {
+                std::cout << "\tProcess wasn't started by aucont_start" << std::endl;
+            }
+            if (!p_exist) {
+                std::cout << "\tProcess is not running atm" << std::endl;
+            }
         }
-        // TODO
 
         return 0;
     } catch(std::exception &e) {
@@ -184,7 +223,12 @@ int aucont_list() {
 
         int pid;
         for (size_t pid_idx = 0; pids.get_pid(pid_idx, pid); ++pid_idx) {
-            std::cout << pid_idx << ": " << pid << std::endl;
+            if (process_exist(pid)) {
+                std::cout << pid_idx << ": " << pid << std::endl;
+            } else {
+                pids.remove_by_idx(pid_idx);
+                pid_idx -= 1;
+            }
         }
 
         return 0;
