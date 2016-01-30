@@ -13,6 +13,7 @@
 #include <vector>
 #include <memory>
 #include <fstream>
+#include <wait.h>
 
 class aucont_exception: public std::exception
 {
@@ -31,20 +32,26 @@ private:
     std::string what_str;
 };
 
+// Checks if 'return_code' != -1
+// Throws aucont_exception if 'return_code' == -1 with 'exception_message'
+// Returns return_code
+int check_result(int return_code, std::string const &exception_message) {
+    if (return_code == -1) {
+        throw(aucont_exception(exception_message));
+    }
+    return return_code;
+}
+
 static char const *SEM_NAME = "/aucont_pids_storage_sem";
 static char const *PIDS_FILE_NAME = "aucont_pids";
 
 sem_t* lock(sem_t *sem) {
-    if (sem_wait(sem) == -1) {
-        throw(aucont_exception("Failed to wait named semaphore"));
-    }
+    check_result(sem_wait(sem), "Failed to wait named semaphore");
     return sem;
 }
 
 void unlock(sem_t *sem) {
-    if (sem_post(sem) == -1) {
-        throw(aucont_exception("Failed to wait named semaphore"));
-    }
+    check_result(sem_post(sem), "Failed to wait named semaphore");
 }
 
 class pids_storage {
@@ -124,7 +131,12 @@ private:
 
     size_t pids_count() {
         file.clear();
-        return static_cast<size_t>(file.seekg(0L, std::ios_base::end).tellg() / sizeof(int));
+        auto file_size_in_bytes = file.seekg(0L, std::ios_base::end).tellg();
+        if (file_size_in_bytes % sizeof(int) != 0) {
+            throw(aucont_exception("Invalid pids file. Size % sizeof(int) != 0. File size = " +
+                                   std::to_string(file_size_in_bytes)));
+        }
+        return static_cast<size_t>(file_size_in_bytes / sizeof(int));
     }
 
 private:
@@ -151,6 +163,28 @@ bool process_exist(int pid) {
     return kill(pid, 0) == 0;
 }
 
+typedef std::pair<std::pair<int, int>, start_arguments> container_main_args;
+
+int container_main(void *container_main_args_ptr) {
+    std::unique_ptr<container_main_args> args_holder(
+                reinterpret_cast<container_main_args*>(container_main_args_ptr));
+    start_arguments &args = args_holder->second;
+    if (close(args_holder->first.second) == -1) {
+        return -1;
+    }
+    char go;
+    if (read(args_holder->first.first, &go, 1) == -1) {
+        return -2;
+    }
+    if (go != 'g') {
+        return -3;
+    }
+
+
+
+    return 0;
+}
+
 int aucont_start(start_arguments const &args) {
     try {
         if (args.debug_enabled) {
@@ -171,9 +205,47 @@ int aucont_start(start_arguments const &args) {
             }
         }
 
+        static size_t const CONTAINER_MAIN_STACK_SIZE = 1 << 12; // 4kb
+        static char CONTAINER_MAIN_STACK[CONTAINER_MAIN_STACK_SIZE] = {0};
+        static char *CONTAINER_MAIN_STACK_TOP = CONTAINER_MAIN_STACK + CONTAINER_MAIN_STACK_SIZE - 1;
+        static int const CLONE_FLAGS =
+                    CLONE_NEWUTS | CLONE_NEWIPC | CLONE_NEWPID | CLONE_NEWNS | SIGCHLD | CLONE_NEWUSER | CLONE_NEWNET;
+        int pipe_descriptors[2];
+        check_result(pipe(pipe_descriptors), "Faled to create pipe");
+        std::unique_ptr<container_main_args> cont_main_args(new container_main_args(
+                {pipe_descriptors[0], pipe_descriptors[1]}, args));
+        int pid = check_result(clone(container_main, CONTAINER_MAIN_STACK_TOP, CLONE_FLAGS, cont_main_args.get()),
+                               "Failed to clone child process");
+        check_result(close(pipe_descriptors[0]), "Failed to close read pipe");
+
+
+//        setup_cpu();
+
+//        setup_net();
+
+
+        check_result(write(pipe_descriptors[1], "g", 1), "Failed to write to pipe");
+        check_result(close(pipe_descriptors[1]), "Failed to close write pipe");
+
         pids_storage pids;
-        // TODO
-        pids.push_back(12);
+        pids.push_back(pid);
+
+        std::cout << "Container with pid '" << pid << "' started" << std::endl;
+
+        if (args.debug_enabled) {
+            printDebug() << "Container is" << (process_exist(pid) ? "" : "n't") << " working at the moment ..." << std::endl;
+        }
+
+        if (!args.daemonize) {
+            int cont_main_return_code;
+            waitpid(pid, &cont_main_return_code, 0);
+            bool removed = pids.remove_by_pid(pid);
+            if (args.debug_enabled) {
+                printDebug() << "Container finished. Exit code: " << cont_main_return_code << std::endl;
+                printDebug() << "Pid " << (removed ? "is removed" : "was already removed") << std::endl;
+            }
+            return cont_main_return_code;
+        }
 
         return 0;
     } catch(std::exception &e) {
@@ -226,7 +298,7 @@ int aucont_list() {
             if (process_exist(pid)) {
                 std::cout << pid_idx << ": " << pid << std::endl;
             } else {
-                pids.remove_by_idx(pid_idx);
+                pids.remove_by_idx(pid_idx); // Not safe! No locking between get_pid and remove_by_idx
                 pid_idx -= 1;
             }
         }
