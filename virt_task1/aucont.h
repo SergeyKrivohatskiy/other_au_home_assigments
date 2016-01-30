@@ -6,7 +6,7 @@
 struct start_arguments {
     std::string image_path;
     std::string cmd;
-    char const **cmd_args;
+    char *const*cmd_args;
     size_t cmd_args_count;
     int cpu_limit;
     in_addr_t cont_ip;

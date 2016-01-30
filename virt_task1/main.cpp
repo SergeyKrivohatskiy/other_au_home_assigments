@@ -84,7 +84,7 @@ int aucont_start_main(int argc, char *argv[]) {
     start_arguments args;
     args.image_path = parse.nonOption(0);
     args.cmd = parse.nonOption(1);
-    args.cmd_args = parse.nonOptions() + 2;
+    args.cmd_args = const_cast<char*const*>(parse.nonOptions() + 1);
     args.cmd_args_count = parse.nonOptionsCount() - 2;
     if (options[CPU_PERC]) {
         args.cpu_limit = strtol(options[CPU_PERC].arg, nullptr, 10);

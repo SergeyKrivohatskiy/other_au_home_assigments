@@ -170,18 +170,49 @@ int container_main(void *container_main_args_ptr) {
                 reinterpret_cast<container_main_args*>(container_main_args_ptr));
     start_arguments &args = args_holder->second;
     if (close(args_holder->first.second) == -1) {
-        return -1;
+        if (args.debug_enabled) {
+            printDebug() << "Failed to close pipe" << std::endl;
+        }
+        return CLOSE_PIPE_ERROR;
     }
     char go;
-    if (read(args_holder->first.first, &go, 1) == -1) {
-        return -2;
+    if (read(args_holder->first.first, &go, 1) == -1 || go != 'g') {
+        if (args.debug_enabled) {
+            printDebug() << "Failed to read 'go' command" << std::endl;
+        }
+        return GO_COMMAND_ERROR;
     }
-    if (go != 'g') {
-        return -3;
+
+    if (args.debug_enabled) {
+        printDebug() << "container_main GO now ..." << std::endl;
     }
 
+    static std::string const HOSTNAME("container");
+    if (sethostname(HOSTNAME.c_str(), HOSTNAME.length())) {
+        if (args.debug_enabled) {
+            printDebug() << "sethostname failed" << std::endl;
+        }
+        return SETHOSTNAME_ERROR;
+    }
+
+    if (args.daemonize) {
+       freopen("/dev/null", "r", stdin);
+       freopen("/dev/null", "w", stdout);
+       freopen("/dev/null", "w", stderr);
+    }
+
+    umask(0);
 
 
+    if (args.debug_enabled) {
+        printDebug() << "executing command ..." << std::endl;
+    }
+    if (execv(args.cmd.c_str(), args.cmd_args) == -1) {
+        if (args.debug_enabled) {
+            printDebug() << "Failed to execute command. Errno = " << errno << std::endl;
+        }
+        return EXECUTE_COMMAND_ERROR;
+    }
     return 0;
 }
 
@@ -200,7 +231,7 @@ int aucont_start(start_arguments const &args) {
             if (args.cmd_args_count) {
                 printDebug() << "cmd_args:" << std::endl;
                 for (size_t cmd_arg_idx = 0; cmd_arg_idx < args.cmd_args_count; ++cmd_arg_idx) {
-                    printDebug() << '\t' << cmd_arg_idx << ": '" << args.cmd_args[cmd_arg_idx] << '\'' << std::endl;
+                    printDebug() << '\t' << cmd_arg_idx << ": '" << args.cmd_args[cmd_arg_idx + 1] << '\'' << std::endl;
                 }
             }
         }
@@ -242,7 +273,7 @@ int aucont_start(start_arguments const &args) {
             bool removed = pids.remove_by_pid(pid);
             if (args.debug_enabled) {
                 printDebug() << "Container finished. Exit code: " << cont_main_return_code << std::endl;
-                printDebug() << "Pid " << (removed ? "is removed" : "was already removed") << std::endl;
+                printDebug() << "Pid " << (removed ? "is removed" : "has been already removed") << std::endl;
             }
             return cont_main_return_code;
         }
