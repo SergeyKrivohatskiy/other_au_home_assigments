@@ -14,6 +14,8 @@
 #include <memory>
 #include <fstream>
 #include <wait.h>
+#include <syscall.h>
+
 
 class aucont_exception: public std::exception
 {
@@ -32,14 +34,30 @@ private:
     std::string what_str;
 };
 
-// Checks if 'return_code' != -1
-// Throws aucont_exception if 'return_code' == -1 with 'exception_message'
+// Checks if check_return_code(return_code)
+// Throws aucont_exception if !check_return_code(return_code) with 'exception_message'
 // Returns return_code
-int check_result(int return_code, std::string const &exception_message) {
-    if (return_code == -1) {
+int check_result(int return_code, std::string const &exception_message,
+                 bool (*check_return_code)(int) = [](int code){return code != -1;}) {
+    if (!check_return_code(return_code)) {
         throw(aucont_exception(exception_message));
     }
     return return_code;
+}
+
+void exec_check_result(std::string const &command) {
+    check_result(system(command.c_str()),
+                 "command '" + command + "' execution failed",
+                 [](int code) {return code == 0;});
+}
+
+void mount_cgroup(std::string const &base_dir, std::string const &cgroup) {
+    static int const ALREADY_MOUNTED_ERR = 8192;
+    std::string cgroup_dir = base_dir + '/' + cgroup;
+    std::string exec_str = "sudo mount -t cgroup " + cgroup + " -o " + cgroup + " " + cgroup_dir +
+            "&& sudo chown 1000:1000 -R " + cgroup_dir;
+    check_result(system(exec_str.c_str()), "Failed to execute mount command:\n\t'" +
+                 exec_str + '\'', [](int err) { return err == 0 || err == ALREADY_MOUNTED_ERR;});
 }
 
 static char const *SEM_NAME = "/aucont_pids_storage_sem";
@@ -155,7 +173,7 @@ std::string to_string(in_addr_t ip) {
 }
 
 bool process_exist(int pid) {
-    // man kill
+    // from man kill
     // If sig is 0, then no signal is sent,
     // but error checking is still performed;
     // this can be used to check for the
@@ -217,7 +235,9 @@ int container_main(void *container_main_args_ptr) {
 }
 
 int aucont_start(start_arguments const &args) {
+    int pipe_descriptors[2] = {0};
     try {
+        assert(system(nullptr)); // shel is available
         if (args.debug_enabled) {
             printDebug() << "Cpu limit is " << args.cpu_limit << std::endl;
             printDebug() << "Container " << (args.daemonize ? "will" : "won't") << " be daemonized" << std::endl;
@@ -241,7 +261,6 @@ int aucont_start(start_arguments const &args) {
         static char *CONTAINER_MAIN_STACK_TOP = CONTAINER_MAIN_STACK + CONTAINER_MAIN_STACK_SIZE - 1;
         static int const CLONE_FLAGS =
                     CLONE_NEWUTS | CLONE_NEWIPC | CLONE_NEWPID | CLONE_NEWNS | SIGCHLD | CLONE_NEWUSER | CLONE_NEWNET;
-        int pipe_descriptors[2];
         check_result(pipe(pipe_descriptors), "Faled to create pipe");
         std::unique_ptr<container_main_args> cont_main_args(new container_main_args(
                 {pipe_descriptors[0], pipe_descriptors[1]}, args));
@@ -249,17 +268,40 @@ int aucont_start(start_arguments const &args) {
                                "Failed to clone child process");
         check_result(close(pipe_descriptors[0]), "Failed to close read pipe");
 
+        static std::string const CGROUP_DIR = "/tmp/aucont/cgroup";
+        static std::string const CPU_CGROUP_DIR = CGROUP_DIR + "/cpu";
 
-//        setup_cpu();
+        /*Create cpu cgroup***************************/
+        std::string const current_cpu_dir = CPU_CGROUP_DIR + "/" + std::to_string(pid);
+        // exec_check_result("rmdir " + current_cpu_dir); // To work fine after restart. Disabled to feel comfortable
+        exec_check_result("mkdir -p " + current_cpu_dir);
+        mount_cgroup(CGROUP_DIR, "cpu");
 
-//        setup_net();
+        /*Setup CPU limit*************************/
+        static long const CPU_PERIOD_US = 50000;
+        static long const CPU_QUOTA_PER_PERCENT = CPU_PERIOD_US / 100;
+        long cpus_count = sysconf(_SC_NPROCESSORS_ONLN);
+        long cpu_quota = CPU_QUOTA_PER_PERCENT * args.cpu_limit * cpus_count;
+        if (args.debug_enabled) {
+            printDebug() << "Cpus count is " << cpus_count << std::endl;
+            printDebug() << "Cpus quota is " << cpu_quota << '/' << CPU_PERIOD_US << std::endl;
+        }
+        exec_check_result("echo " + std::to_string(CPU_PERIOD_US) +  " >> " + current_cpu_dir + "/cpu.cfs_period_us");
+        exec_check_result("echo " + std::to_string(cpu_quota) +  " >> " + current_cpu_dir + "/cpu.cfs_quota_us");
+        exec_check_result("echo " + std::to_string(pid) +  " >> " + current_cpu_dir + "/tasks");
 
+        /*Setup networking************************/
+        // TODO
+
+
+        pids_storage pids;
+        pids.push_back(pid);
 
         check_result(write(pipe_descriptors[1], "g", 1), "Failed to write to pipe");
         check_result(close(pipe_descriptors[1]), "Failed to close write pipe");
 
-        pids_storage pids;
-        pids.push_back(pid);
+
+
 
         std::cout << "Container with pid '" << pid << "' started" << std::endl;
 
@@ -280,6 +322,10 @@ int aucont_start(start_arguments const &args) {
 
         return 0;
     } catch(std::exception &e) {
+        if (pipe_descriptors[0] != 0 || pipe_descriptors[1] != 0) { // to stop cloned process
+            write(pipe_descriptors[1], "s", 1);
+            close(pipe_descriptors[1]);
+        }
         std::cerr << "Exception: " << e.what() << std::endl;
         return EXCEPTION_OCCURED_ERROR;
     }
