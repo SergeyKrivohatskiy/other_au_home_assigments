@@ -54,10 +54,11 @@ void exec_check_result(std::string const &command) {
 void mount_cgroup(std::string const &base_dir, std::string const &cgroup) {
     static int const ALREADY_MOUNTED_ERR = 8192;
     std::string cgroup_dir = base_dir + '/' + cgroup;
-    std::string exec_str = "sudo mount -t cgroup " + cgroup + " -o " + cgroup + " " + cgroup_dir +
-            "&& sudo chown 1000:1000 -R " + cgroup_dir;
+    std::string exec_str = "sudo mount -t cgroup " + cgroup + " -o " + cgroup + " " + cgroup_dir;
+    exec_check_result("mkdir -p " + cgroup_dir);
     check_result(system(exec_str.c_str()), "Failed to execute mount command:\n\t'" +
                  exec_str + '\'', [](int err) { return err == 0 || err == ALREADY_MOUNTED_ERR;});
+    exec_check_result("sudo chown 1000:1000 -R " + cgroup_dir);
 }
 
 static char const *SEM_NAME = "/aucont_pids_storage_sem";
@@ -269,13 +270,19 @@ int aucont_start(start_arguments const &args) {
         check_result(close(pipe_descriptors[0]), "Failed to close read pipe");
 
         static std::string const CGROUP_DIR = "/tmp/aucont/cgroup";
-        static std::string const CPU_CGROUP_DIR = CGROUP_DIR + "/cpu";
+
+        /*Create cgroups******************************/
+        mount_cgroup(CGROUP_DIR, "cpu");
+        mount_cgroup(CGROUP_DIR, "memory");
+        mount_cgroup(CGROUP_DIR, "blkio");
+        mount_cgroup(CGROUP_DIR, "cpuacct");
+        mount_cgroup(CGROUP_DIR, "cpuset");
 
         /*Create cpu cgroup***************************/
+        static std::string const CPU_CGROUP_DIR = CGROUP_DIR + "/cpu";
         std::string const current_cpu_dir = CPU_CGROUP_DIR + "/" + std::to_string(pid);
         // exec_check_result("rmdir " + current_cpu_dir); // To work fine after restart. Disabled to feel comfortable
         exec_check_result("mkdir -p " + current_cpu_dir);
-        mount_cgroup(CGROUP_DIR, "cpu");
 
         /*Setup CPU limit*************************/
         static long const CPU_PERIOD_US = 50000;
