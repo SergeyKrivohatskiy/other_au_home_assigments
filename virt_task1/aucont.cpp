@@ -15,6 +15,7 @@
 #include <fstream>
 #include <wait.h>
 #include <syscall.h>
+#include <grp.h>
 
 
 class aucont_exception: public std::exception
@@ -62,7 +63,7 @@ void mount_cgroup(std::string const &base_dir, std::string const &cgroup) {
 }
 
 static char const *SEM_NAME = "/aucont_pids_storage_sem";
-static char const *PIDS_FILE_NAME = "aucont_pids";
+static std::string const PIDS_FILE_NAME = "/tmp/aucont/pids_storage";
 
 sem_t* lock(sem_t *sem) {
     check_result(sem_wait(sem), "Failed to wait named semaphore");
@@ -74,12 +75,15 @@ void unlock(sem_t *sem) {
 }
 
 class pids_storage {
+private:
+    typedef std::unique_ptr<sem_t, void (*)(sem_t*)> sem_guard;
 public:
     pids_storage() {
         sem = sem_open(SEM_NAME, O_CREAT, 0666, 1);
         if (sem == SEM_FAILED) {
             throw(aucont_exception("Failed to open named semaphore"));
         }
+        exec_check_result("touch " + PIDS_FILE_NAME);
         file.open(PIDS_FILE_NAME);
         if (!file.is_open()) {
             sem_close(sem);
@@ -92,18 +96,18 @@ public:
     }
 
     void push_back(int pid) {
-        std::unique_ptr<sem_t, void (*)(sem_t*)> guard(lock(sem), unlock);
+        sem_guard guard(lock(sem), unlock);
         file.seekp(0L, std::ios_base::end).write(reinterpret_cast<char*>(&pid), sizeof(int)).flush();
     }
 
     bool remove_by_idx(size_t id) {
-        std::unique_ptr<sem_t, void (*)(sem_t*)> guard(lock(sem), unlock);
+        sem_guard guard(lock(sem), unlock);
         return remove_by_idx_unsafe(id, pids_count());
     }
 
     // Warn: complexity is O(n)
     bool remove_by_pid(int pid) {
-        std::unique_ptr<sem_t, void (*)(sem_t*)> guard(lock(sem), unlock);
+        sem_guard guard(lock(sem), unlock);
         size_t count = pids_count();
         size_t pos_found = 0;
         while(pos_found != count) {
@@ -123,7 +127,7 @@ public:
     }
 
     bool get_pid(size_t idx, int &pid) {
-        std::unique_ptr<sem_t, void (*)(sem_t*)> guard(lock(sem), unlock);
+        sem_guard guard(lock(sem), unlock);
         if (pids_count() <= idx) {
             return false;
         } else {
@@ -143,7 +147,7 @@ private:
         file.seekp(idx * sizeof(int), std::ios_base::beg).
                 write(reinterpret_cast<char*>(&pid), sizeof(int)).flush();
 
-        bool tr_succ = truncate(PIDS_FILE_NAME, (count - 1) * sizeof(int)) == 0;
+        bool tr_succ = truncate(PIDS_FILE_NAME.c_str(), (count - 1) * sizeof(int)) == 0;
         assert(tr_succ);
         return true;
     }
@@ -206,6 +210,9 @@ int container_main(void *container_main_args_ptr) {
         printDebug() << "container_main GO now ..." << std::endl;
     }
 
+    setgroups(0, nullptr);
+    umask(0);
+
     static std::string const HOSTNAME("container");
     if (sethostname(HOSTNAME.c_str(), HOSTNAME.length())) {
         if (args.debug_enabled) {
@@ -219,8 +226,6 @@ int container_main(void *container_main_args_ptr) {
        freopen("/dev/null", "w", stdout);
        freopen("/dev/null", "w", stderr);
     }
-
-    umask(0);
 
 
     if (args.debug_enabled) {
@@ -310,7 +315,7 @@ int aucont_start(start_arguments const &args) {
 
 
 
-        std::cout << "Container with pid '" << pid << "' started" << std::endl;
+        std::cout << pid << std::endl;
 
         if (args.debug_enabled) {
             printDebug() << "Container is" << (process_exist(pid) ? "" : "n't") << " working at the moment ..." << std::endl;
@@ -375,12 +380,13 @@ int aucont_list() {
     try {
         pids_storage pids;
 
-        std::cout << "Running containers pids:" << std::endl;
+        //std::cout << "Running containers pids:" << std::endl;
 
         int pid;
         for (size_t pid_idx = 0; pids.get_pid(pid_idx, pid); ++pid_idx) {
             if (process_exist(pid)) {
-                std::cout << pid_idx << ": " << pid << std::endl;
+                //std::cout << pid_idx << ": " << pid << std::endl;
+                std::cout << pid << std::endl;
             } else {
                 pids.remove_by_idx(pid_idx); // Not safe! No locking between get_pid and remove_by_idx
                 pid_idx -= 1;
