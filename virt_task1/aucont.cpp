@@ -217,6 +217,7 @@ int container_main(void *container_main_args_ptr) {
         printDebug() << "container_main GO now ..." << std::endl;
     }
 
+    /*Setup filesystem layout*****************/
     check_result(mount("proc", (args.image_path + "/proc").c_str(), "proc", 0, nullptr), "Failed to mount proc fs");
     check_result(mount("tmp", (args.image_path + "/tmp").c_str(), "tmpfs", 0, nullptr), "Failed to mount tmp fs");
 
@@ -241,16 +242,22 @@ int container_main(void *container_main_args_ptr) {
     check_result(syscall(SYS_pivot_root, args.image_path.c_str(), tmp_old_root_dir.c_str()), "Change root dir");
     check_result(umount2(tmp_old_root.c_str(), MNT_DETACH), "Umount old root");
 
+
+
+    /*Setup networking************************/
+    if (args.net_enabled) {
+        // TODO
+        static std::string const HOSTNAME("container");
+        if (sethostname(HOSTNAME.c_str(), HOSTNAME.length())) {
+            if (args.debug_enabled) {
+                printDebug() << "sethostname failed" << std::endl;
+            }
+            return SETHOSTNAME_ERROR;
+        }
+    }
+
     setgroups(0, nullptr);
     umask(0);
-
-    static std::string const HOSTNAME("container");
-    if (sethostname(HOSTNAME.c_str(), HOSTNAME.length())) {
-        if (args.debug_enabled) {
-            printDebug() << "sethostname failed" << std::endl;
-        }
-        return SETHOSTNAME_ERROR;
-    }
 
     if (args.daemonize) {
        freopen("/dev/null", "r", stdin);
@@ -301,13 +308,21 @@ int aucont_start(start_arguments const &args) {
         check_result(pipe(pipe_descriptors), "Faled to create pipe");
         std::unique_ptr<container_main_args> cont_main_args(new container_main_args(
                 {pipe_descriptors[0], pipe_descriptors[1]}, args));
-        int pid = check_result(clone(container_main, CONTAINER_MAIN_STACK_TOP, CLONE_FLAGS, cont_main_args.get()),
+        int const pid = check_result(clone(container_main, CONTAINER_MAIN_STACK_TOP, CLONE_FLAGS, cont_main_args.get()),
                                "Failed to clone child process");
         check_result(close(pipe_descriptors[0]), "Failed to close read pipe");
 
-        static std::string const CGROUP_DIR = "/tmp/aucont/cgroup";
+        /*Map uid, gid********************************/
+        std::string const pid_str(std::to_string(pid));
+        exec_check_result("echo deny > /proc/" + pid_str + "/setgroups");
+        std::string const uid_str = std::to_string(getuid());
+        std::string const gid_str = std::to_string(getgid());
+        exec_check_result("echo 0 " + uid_str + " 1 >> /proc/" + pid_str + "/uid_map");
+        exec_check_result("echo 0 " + gid_str + " 1 >> /proc/" + pid_str + "/gid_map");
+
 
         /*Create cgroups******************************/
+        static std::string const CGROUP_DIR = "/tmp/aucont/cgroup";
         mount_cgroup(CGROUP_DIR, "cpu");
         mount_cgroup(CGROUP_DIR, "memory");
         mount_cgroup(CGROUP_DIR, "blkio");
@@ -331,11 +346,12 @@ int aucont_start(start_arguments const &args) {
         }
         exec_check_result("echo " + std::to_string(CPU_PERIOD_US) +  " >> " + current_cpu_dir + "/cpu.cfs_period_us");
         exec_check_result("echo " + std::to_string(cpu_quota) +  " >> " + current_cpu_dir + "/cpu.cfs_quota_us");
-        exec_check_result("echo " + std::to_string(pid) +  " >> " + current_cpu_dir + "/tasks");
+        exec_check_result("echo " + pid_str +  " >> " + current_cpu_dir + "/tasks");
 
         /*Setup networking************************/
-        // TODO
-
+        if (args.net_enabled) {
+            // TODO
+        }
 
         pids_storage pids;
         pids.push_back(pid);
