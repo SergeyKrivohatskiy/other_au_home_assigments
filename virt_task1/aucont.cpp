@@ -16,6 +16,7 @@
 #include <wait.h>
 #include <syscall.h>
 #include <grp.h>
+#include <sys/mount.h>
 
 
 class aucont_exception: public std::exception
@@ -55,7 +56,8 @@ void exec_check_result(std::string const &command) {
 void mount_cgroup(std::string const &base_dir, std::string const &cgroup) {
     static int const ALREADY_MOUNTED_ERR = 8192;
     std::string cgroup_dir = base_dir + '/' + cgroup;
-    std::string exec_str = "sudo mount -t cgroup " + cgroup + " -o " + cgroup + " " + cgroup_dir;
+    std::string exec_str = "sudo mount -t cgroup " + cgroup + " -o " + cgroup + " " + cgroup_dir +
+            "  > /dev/null 2>&1";
     exec_check_result("mkdir -p " + cgroup_dir);
     check_result(system(exec_str.c_str()), "Failed to execute mount command:\n\t'" +
                  exec_str + '\'', [](int err) { return err == 0 || err == ALREADY_MOUNTED_ERR;});
@@ -186,6 +188,11 @@ bool process_exist(int pid) {
     return kill(pid, 0) == 0;
 }
 
+void mknod_mount_dev(std::string const &what) {
+    mknod(what.c_str(), S_IFREG | 0666, 0);
+    check_result(mount(what.c_str(), what.c_str(), nullptr, MS_BIND, nullptr), "Failed to mount " + what);
+}
+
 typedef std::pair<std::pair<int, int>, start_arguments> container_main_args;
 
 int container_main(void *container_main_args_ptr) {
@@ -209,6 +216,30 @@ int container_main(void *container_main_args_ptr) {
     if (args.debug_enabled) {
         printDebug() << "container_main GO now ..." << std::endl;
     }
+
+    check_result(mount("proc", (args.image_path + "/proc").c_str(), "proc", 0, nullptr), "Failed to mount proc fs");
+    check_result(mount("tmp", (args.image_path + "/tmp").c_str(), "tmpfs", 0, nullptr), "Failed to mount tmp fs");
+
+    check_result(chdir(args.image_path.c_str()), "Failed to chdir to image_path");
+
+    check_result(mount("sandbox-dev", "dev", "tmpfs",
+                       MS_NOSUID | MS_NODEV | MS_NOEXEC | MS_NOATIME,
+                       "size=64k,nr_inodes=16,mode=755"), "sand box dev");
+
+    mknod_mount_dev("/dev/zero");
+    mknod_mount_dev("/dev/null");
+    mknod_mount_dev("/dev/random");
+    mknod_mount_dev("/dev/urandom");
+
+    std::string tmp_old_root = "/old_root";
+    std::string tmp_old_root_dir = args.image_path + tmp_old_root;
+    check_result(mkdir(tmp_old_root_dir.c_str(), 0777), "Make tmp_old_root_dir", [](int code) {
+        return code != -1 || errno ==EEXIST;
+    });
+
+    check_result(mount(args.image_path.c_str(), args.image_path.c_str(), "bind", MS_BIND | MS_REC, NULL), "Mount image_path");
+    check_result(syscall(SYS_pivot_root, args.image_path.c_str(), tmp_old_root_dir.c_str()), "Change root dir");
+    check_result(umount2(tmp_old_root.c_str(), MNT_DETACH), "Umount old root");
 
     setgroups(0, nullptr);
     umask(0);
@@ -355,7 +386,7 @@ int aucont_stop(const stop_arguments &args) {
         bool removed = pids.remove_by_pid(args.pid);
         bool p_exist = process_exist(args.pid);
         if (removed && p_exist) {
-            bool signal_sent = kill(args.pid, args.signal);
+            bool signal_sent = kill(args.pid, args.signal) == 0;
             std::cout << "Signal " << args.signal << (signal_sent ? " was " : " wasn't ")
                       << "sent to process with pid " << args.pid << std::endl;
         } else {
