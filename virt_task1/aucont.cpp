@@ -189,94 +189,105 @@ bool process_exist(int pid) {
 }
 
 void mknod_mount_dev(std::string const &what) {
-    mknod(what.c_str(), S_IFREG | 0666, 0);
+    check_result(mknod(what.c_str(), S_IFREG | 0666, 0),  "Failed to mknod " + what);
     check_result(mount(what.c_str(), what.c_str(), nullptr, MS_BIND, nullptr), "Failed to mount " + what);
 }
 
 typedef std::pair<std::pair<int, int>, start_arguments> container_main_args;
 
 int container_main(void *container_main_args_ptr) {
-    std::unique_ptr<container_main_args> args_holder(
-                reinterpret_cast<container_main_args*>(container_main_args_ptr));
-    start_arguments &args = args_holder->second;
-    if (close(args_holder->first.second) == -1) {
-        if (args.debug_enabled) {
-            printDebug() << "Failed to close pipe" << std::endl;
-        }
-        return CLOSE_PIPE_ERROR;
-    }
-    char go;
-    if (read(args_holder->first.first, &go, 1) == -1 || go != 'g') {
-        if (args.debug_enabled) {
-            printDebug() << "Failed to read 'go' command" << std::endl;
-        }
-        return GO_COMMAND_ERROR;
-    }
-
-    if (args.debug_enabled) {
-        printDebug() << "container_main GO now ..." << std::endl;
-    }
-
-    /*Setup filesystem layout*****************/
-    check_result(mount("proc", (args.image_path + "/proc").c_str(), "proc", 0, nullptr), "Failed to mount proc fs");
-    check_result(mount("tmp", (args.image_path + "/tmp").c_str(), "tmpfs", 0, nullptr), "Failed to mount tmp fs");
-
-    check_result(chdir(args.image_path.c_str()), "Failed to chdir to image_path");
-
-    check_result(mount("sandbox-dev", "dev", "tmpfs",
-                       MS_NOSUID | MS_NODEV | MS_NOEXEC | MS_NOATIME,
-                       "size=64k,nr_inodes=16,mode=755"), "sand box dev");
-
-    mknod_mount_dev("/dev/zero");
-    mknod_mount_dev("/dev/null");
-    mknod_mount_dev("/dev/random");
-    mknod_mount_dev("/dev/urandom");
-
-    std::string tmp_old_root = "/old_root";
-    std::string tmp_old_root_dir = args.image_path + tmp_old_root;
-    check_result(mkdir(tmp_old_root_dir.c_str(), 0777), "Make tmp_old_root_dir", [](int code) {
-        return code != -1 || errno ==EEXIST;
-    });
-
-    check_result(mount(args.image_path.c_str(), args.image_path.c_str(), "bind", MS_BIND | MS_REC, NULL), "Mount image_path");
-    check_result(syscall(SYS_pivot_root, args.image_path.c_str(), tmp_old_root_dir.c_str()), "Change root dir");
-    check_result(umount2(tmp_old_root.c_str(), MNT_DETACH), "Umount old root");
-
-
-
-    /*Setup networking************************/
-    if (args.net_enabled) {
-        // TODO
-        static std::string const HOSTNAME("container");
-        if (sethostname(HOSTNAME.c_str(), HOSTNAME.length())) {
+    try {
+        std::unique_ptr<container_main_args> args_holder(
+                    reinterpret_cast<container_main_args*>(container_main_args_ptr));
+        start_arguments &args = args_holder->second;
+        if (close(args_holder->first.second) == -1) {
             if (args.debug_enabled) {
-                printDebug() << "sethostname failed" << std::endl;
+                printDebug() << "Failed to close pipe" << std::endl;
             }
-            return SETHOSTNAME_ERROR;
+            return CLOSE_PIPE_ERROR;
         }
-    }
+        char go;
+        if (read(args_holder->first.first, &go, 1) == -1 || go != 'g') {
+            if (args.debug_enabled) {
+                printDebug() << "Failed to read 'go' command" << std::endl;
+            }
+            return GO_COMMAND_ERROR;
+        }
 
-    setgroups(0, nullptr);
-    umask(0);
-
-    if (args.daemonize) {
-       freopen("/dev/null", "r", stdin);
-       freopen("/dev/null", "w", stdout);
-       freopen("/dev/null", "w", stderr);
-    }
-
-
-    if (args.debug_enabled) {
-        printDebug() << "executing command ..." << std::endl;
-    }
-    if (execv(args.cmd.c_str(), args.cmd_args) == -1) {
         if (args.debug_enabled) {
-            printDebug() << "Failed to execute command. Errno = " << errno << std::endl;
+            printDebug() << "container_main GO now ..." << std::endl;
         }
-        return EXECUTE_COMMAND_ERROR;
+
+
+        /*Setup filesystem layout*****************/
+        check_result(mount("proc", (args.image_path + "/proc").c_str(), "proc", 0, nullptr), "Failed to mount proc fs");
+        check_result(mount("tmp", (args.image_path + "/tmp").c_str(), "tmpfs", 0, nullptr), "Failed to mount tmp fs");
+        check_result(mount("sys", (args.image_path + "/sys").c_str(), "sysfs", 0, nullptr), "Failed to mount sys fs");
+
+        check_result(chdir(args.image_path.c_str()), "Failed to chdir to image_path");
+
+        check_result(mount("sandbox-dev", "dev", "tmpfs",
+                           MS_NOSUID | MS_NODEV | MS_NOEXEC | MS_NOATIME,
+                           "size=64k,nr_inodes=16,mode=755"), "Failed to mount sandbox-dev");
+
+        mknod_mount_dev("dev/zero");
+        mknod_mount_dev("dev/null");
+        mknod_mount_dev("dev/random");
+        mknod_mount_dev("dev/urandom");
+        mknod_mount_dev("dev/mqueue");
+        check_result(mkdir("dev/shm", 0755), "Failed to make shm dir");
+
+        std::string tmp_old_root = "/old_root";
+        std::string tmp_old_root_dir = args.image_path + tmp_old_root;
+        check_result(mkdir(tmp_old_root_dir.c_str(), 0777), "Make tmp_old_root_dir", [](int code) {
+            return code != -1 || errno ==EEXIST;
+        });
+
+        check_result(mount(args.image_path.c_str(), args.image_path.c_str(), "bind", MS_BIND | MS_REC, NULL), "Mount image_path");
+        check_result(syscall(SYS_pivot_root, args.image_path.c_str(), tmp_old_root_dir.c_str()), "Change root dir");
+        check_result(umount2(tmp_old_root.c_str(), MNT_DETACH), "Umount old root");
+
+
+        /*Setup networking************************/
+        if (args.net_enabled) {
+            // TODO
+            static std::string const HOSTNAME("container");
+            if (sethostname(HOSTNAME.c_str(), HOSTNAME.length())) {
+                if (args.debug_enabled) {
+                    printDebug() << "sethostname failed" << std::endl;
+                }
+                return SETHOSTNAME_ERROR;
+            }
+        }
+
+        setgroups(0, nullptr);
+        umask(0);
+
+        if (args.daemonize) {
+           freopen("/dev/null", "r", stdin);
+           freopen("/dev/null", "w", stdout);
+           freopen("/dev/null", "w", stderr);
+        }
+
+
+        if (args.debug_enabled) {
+            printDebug() << "executing command ..." << std::endl;
+        }
+        if (execv(args.cmd.c_str(), args.cmd_args) == -1) {
+            if (args.debug_enabled) {
+                printDebug() << "Failed to execute command. Errno = " << errno << std::endl;
+            }
+            return EXECUTE_COMMAND_ERROR;
+        }
+        return 0;
+    } catch(std::exception &e) {
+        std::cerr << "Exception: " << e.what() << std::endl;
+        return EXCEPTION_OCCURED_ERROR;
     }
-    return 0;
 }
+
+static std::string const CGROUP_DIR = "/tmp/aucont/cgroup";
+static std::string const CPU_CGROUP_DIR = CGROUP_DIR + "/cpu";
 
 int aucont_start(start_arguments const &args) {
     int pipe_descriptors[2] = {0};
@@ -322,7 +333,6 @@ int aucont_start(start_arguments const &args) {
 
 
         /*Create cgroups******************************/
-        static std::string const CGROUP_DIR = "/tmp/aucont/cgroup";
         mount_cgroup(CGROUP_DIR, "cpu");
         mount_cgroup(CGROUP_DIR, "memory");
         mount_cgroup(CGROUP_DIR, "blkio");
@@ -330,7 +340,6 @@ int aucont_start(start_arguments const &args) {
         mount_cgroup(CGROUP_DIR, "cpuset");
 
         /*Create cpu cgroup***************************/
-        static std::string const CPU_CGROUP_DIR = CGROUP_DIR + "/cpu";
         std::string const current_cpu_dir = CPU_CGROUP_DIR + "/" + std::to_string(pid);
         exec_check_result("mkdir -p " + current_cpu_dir);
 
@@ -434,8 +443,8 @@ int aucont_list() {
                 //std::cout << pid_idx << ": " << pid << std::endl;
                 std::cout << pid << std::endl;
             } else {
-                pids.remove_by_idx(pid_idx); // Not safe! No locking between get_pid and remove_by_idx
-                pid_idx -= 1;
+//                pids.remove_by_idx(pid_idx); // Not safe! No locking between get_pid and remove_by_idx
+//                pid_idx -= 1;
             }
         }
 
@@ -446,18 +455,70 @@ int aucont_list() {
     }
 }
 
+void set_ns(std::string const &pid_str, std::string const &ns_name) {
+    std::string ns_dir_path_str = "/proc/" + pid_str + "/ns/" + ns_name;
+    int ns_dir = check_result(open(ns_dir_path_str.c_str(), O_RDONLY, O_CLOEXEC), "Failed to open ns dir");
+    check_result(setns(ns_dir, 0), "Failed to set ns");
+    check_result(close(ns_dir), "Failed to close ns dir descriptor");
+}
+
 int aucont_exec(exec_arguments const &args) {
-    if (args.debug_enabled) {
-        printDebug() << "PID is " << args.pid << std::endl;
-        printDebug() << "cmd is '" << args.cmd << '\'' << std::endl;
-        if (args.cmd_args_count) {
-            printDebug() << "cmd_args:" << std::endl;
-            for (size_t cmd_arg_idx = 0; cmd_arg_idx < args.cmd_args_count; ++cmd_arg_idx) {
-                printDebug() << '\t' << cmd_arg_idx << ": '" << args.cmd_args[cmd_arg_idx] << '\'' << std::endl;
+    try {
+        if (args.debug_enabled) {
+            printDebug() << "PID is " << args.pid << std::endl;
+            printDebug() << "cmd is '" << args.cmd << '\'' << std::endl;
+            if (args.cmd_args_count) {
+                printDebug() << "cmd_args:" << std::endl;
+                for (size_t cmd_arg_idx = 0; cmd_arg_idx < args.cmd_args_count; ++cmd_arg_idx) {
+                    printDebug() << '\t' << cmd_arg_idx << ": '" << args.cmd_args[cmd_arg_idx + 1] << '\'' << std::endl;
+                }
             }
         }
-    }
+        std::string pid_str = std::to_string(args.pid);
 
-    // TODO
-    return 0;
+
+        /*Enter to container's CPU cgroup*************/
+        std::string tasks_path = CPU_CGROUP_DIR + "/" + pid_str + "/tasks";
+        std::string cur_pid_str = std::to_string(getpid());
+        exec_check_result("echo " + cur_pid_str + " >> " + tasks_path);
+
+
+        /*Change work dir ************************/
+        int fd = check_result(open(("/proc/" + pid_str + "/" + "root").c_str(), O_RDONLY), "Failed to open container root dir");
+        check_result(fchdir(fd), "Failed to change work dir", [](int err) {return !err;});
+
+
+        /*Enter to container's ns*****************/
+        set_ns(pid_str, "user");
+        set_ns(pid_str, "ipc");
+        set_ns(pid_str, "uts");
+        set_ns(pid_str, "net");
+        set_ns(pid_str, "pid");
+        set_ns(pid_str, "mnt");
+
+
+        /*Change root dir*************************/
+        check_result(chroot("."), "Failed to change root");
+
+
+        /*Exec and wait command*******************/
+        int exec_pid = fork();
+        if (exec_pid == 0) {
+            setgroups(0, nullptr);
+            setgid(0);
+            setuid(0);
+
+            if (execv(args.cmd.c_str(), args.cmd_args) == -1) {
+                return EXECUTE_COMMAND_ERROR;
+            }
+        } else {
+            waitpid(exec_pid, NULL, 0);
+        }
+
+
+        return 0;
+    } catch(std::exception &e) {
+        std::cerr << "Exception: " << e.what() << std::endl;
+        return EXCEPTION_OCCURED_ERROR;
+    }
 }

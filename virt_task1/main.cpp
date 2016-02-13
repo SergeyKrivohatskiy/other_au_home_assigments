@@ -234,9 +234,9 @@ int aucont_exec_main(int argc, char *argv[]) {
         print_arg_error_message("PID", "should be numeric\n");
         return PARSE_ARG_ERROR;
     }
-    args.cmd = parse.nonOption(0);
-    args.cmd_args = parse.nonOptions() + 1;
-    args.cmd_args_count = parse.nonOptionsCount() - 1;
+    args.cmd = parse.nonOption(1);
+    args.cmd_args = const_cast<char*const*>(parse.nonOptions() + 1);
+    args.cmd_args_count = parse.nonOptionsCount() - 2;
     args.debug_enabled = options[DEBUG];
 
 
