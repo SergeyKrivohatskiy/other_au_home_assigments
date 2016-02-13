@@ -65,7 +65,7 @@ void mount_cgroup(std::string const &base_dir, std::string const &cgroup) {
 }
 
 static char const *SEM_NAME = "/aucont_pids_storage_sem";
-static std::string const PIDS_FILE_NAME = "/tmp/aucont/pids_storage";
+static std::string const PIDS_FILE_NAME = "pids_storage";
 
 sem_t* lock(sem_t *sem) {
     check_result(sem_wait(sem), "Failed to wait named semaphore");
@@ -332,7 +332,6 @@ int aucont_start(start_arguments const &args) {
         /*Create cpu cgroup***************************/
         static std::string const CPU_CGROUP_DIR = CGROUP_DIR + "/cpu";
         std::string const current_cpu_dir = CPU_CGROUP_DIR + "/" + std::to_string(pid);
-        // exec_check_result("rmdir " + current_cpu_dir); // To work fine after restart. Disabled to feel comfortable
         exec_check_result("mkdir -p " + current_cpu_dir);
 
         /*Setup CPU limit*************************/
