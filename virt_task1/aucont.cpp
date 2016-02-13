@@ -193,13 +193,25 @@ void mknod_mount_dev(std::string const &what) {
     check_result(mount(what.c_str(), what.c_str(), nullptr, MS_BIND, nullptr), "Failed to mount " + what);
 }
 
-typedef std::pair<std::pair<int, int>, start_arguments> container_main_args;
+struct container_main_args {
+    container_main_args(int pipe_descriptors[2], start_arguments const &args, std::string const &net_id):
+        first(pipe_descriptors[0], pipe_descriptors[1]),
+        second(args),
+        net_id(net_id)
+    {
+    }
+
+    std::pair<int, int> first;
+    start_arguments second;
+    std::string net_id;
+};
 
 int container_main(void *container_main_args_ptr) {
     try {
         std::unique_ptr<container_main_args> args_holder(
                     reinterpret_cast<container_main_args*>(container_main_args_ptr));
         start_arguments &args = args_holder->second;
+        std::string &net_id = args_holder->net_id;
         if (close(args_holder->first.second) == -1) {
             if (args.debug_enabled) {
                 printDebug() << "Failed to close pipe" << std::endl;
@@ -248,16 +260,21 @@ int container_main(void *container_main_args_ptr) {
         check_result(umount2(tmp_old_root.c_str(), MNT_DETACH), "Umount old root");
 
 
+        /*Setup hostname**************************/
+        static std::string const HOSTNAME("container");
+        if (sethostname(HOSTNAME.c_str(), HOSTNAME.length())) {
+            if (args.debug_enabled) {
+                printDebug() << "sethostname failed" << std::endl;
+            }
+            return SETHOSTNAME_ERROR;
+        }
+
+
         /*Setup networking************************/
         if (args.net_enabled) {
-            // TODO
-            static std::string const HOSTNAME("container");
-            if (sethostname(HOSTNAME.c_str(), HOSTNAME.length())) {
-                if (args.debug_enabled) {
-                    printDebug() << "sethostname failed" << std::endl;
-                }
-                return SETHOSTNAME_ERROR;
-            }
+            exec_check_result("ip link set lo up");
+            exec_check_result("ip link set u-" + net_id + "-1 up");
+            exec_check_result("ip addr add " + to_string(args.cont_ip) + "/24 dev u-" + net_id + "-1");
         }
 
         setgroups(0, nullptr);
@@ -311,6 +328,7 @@ int aucont_start(start_arguments const &args) {
             }
         }
 
+        std::string net_id = "Net" + std::to_string(getpid());
         static size_t const CONTAINER_MAIN_STACK_SIZE = 1 << 12; // 4kb
         static char CONTAINER_MAIN_STACK[CONTAINER_MAIN_STACK_SIZE] = {0};
         static char *CONTAINER_MAIN_STACK_TOP = CONTAINER_MAIN_STACK + CONTAINER_MAIN_STACK_SIZE - 1;
@@ -318,10 +336,11 @@ int aucont_start(start_arguments const &args) {
                     CLONE_NEWUTS | CLONE_NEWIPC | CLONE_NEWPID | CLONE_NEWNS | SIGCHLD | CLONE_NEWUSER | CLONE_NEWNET;
         check_result(pipe(pipe_descriptors), "Faled to create pipe");
         std::unique_ptr<container_main_args> cont_main_args(new container_main_args(
-                {pipe_descriptors[0], pipe_descriptors[1]}, args));
+                pipe_descriptors, args, net_id));
         int const pid = check_result(clone(container_main, CONTAINER_MAIN_STACK_TOP, CLONE_FLAGS, cont_main_args.get()),
                                "Failed to clone child process");
         check_result(close(pipe_descriptors[0]), "Failed to close read pipe");
+
 
         /*Map uid, gid********************************/
         std::string const pid_str(std::to_string(pid));
@@ -339,9 +358,11 @@ int aucont_start(start_arguments const &args) {
         mount_cgroup(CGROUP_DIR, "cpuacct");
         mount_cgroup(CGROUP_DIR, "cpuset");
 
+
         /*Create cpu cgroup***************************/
         std::string const current_cpu_dir = CPU_CGROUP_DIR + "/" + std::to_string(pid);
         exec_check_result("mkdir -p " + current_cpu_dir);
+
 
         /*Setup CPU limit*************************/
         static long const CPU_PERIOD_US = 50000;
@@ -356,18 +377,22 @@ int aucont_start(start_arguments const &args) {
         exec_check_result("echo " + std::to_string(cpu_quota) +  " >> " + current_cpu_dir + "/cpu.cfs_quota_us");
         exec_check_result("echo " + pid_str +  " >> " + current_cpu_dir + "/tasks");
 
+
         /*Setup networking************************/
         if (args.net_enabled) {
-            // TODO
+            exec_check_result("sudo ip link add name u-" + net_id + "-0 type veth peer name u-" + net_id + "-1");
+            exec_check_result("sudo ip link set u-" + net_id + "-1 netns " + pid_str);
+            exec_check_result("sudo ip link set u-" + net_id + "-0 up");
+            exec_check_result("sudo ip addr add " + to_string(args.host_ip) + "/24 dev u-" + net_id + "-0");
         }
+
 
         pids_storage pids;
         pids.push_back(pid);
 
+
         check_result(write(pipe_descriptors[1], "g", 1), "Failed to write to pipe");
         check_result(close(pipe_descriptors[1]), "Failed to close write pipe");
-
-
 
 
         std::cout << pid << std::endl;
