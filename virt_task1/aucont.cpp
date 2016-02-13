@@ -61,7 +61,6 @@ void mount_cgroup(std::string const &base_dir, std::string const &cgroup) {
     exec_check_result("mkdir -p " + cgroup_dir);
     check_result(system(exec_str.c_str()), "Failed to execute mount command:\n\t'" +
                  exec_str + '\'', [](int err) { return err == 0 || err == ALREADY_MOUNTED_ERR;});
-    exec_check_result("sudo chown 1000:1000 -R " + cgroup_dir);
 }
 
 static char const *SEM_NAME = "/aucont_pids_storage_sem";
@@ -238,16 +237,16 @@ int container_main(void *container_main_args_ptr) {
 
         check_result(chdir(args.image_path.c_str()), "Failed to chdir to image_path");
 
-        check_result(mount("sandbox-dev", "dev", "tmpfs",
-                           MS_NOSUID | MS_NODEV | MS_NOEXEC | MS_NOATIME,
-                           "size=64k,nr_inodes=16,mode=755"), "Failed to mount sandbox-dev");
+//        check_result(mount("sandbox-dev", "dev", "tmpfs",
+//                           MS_NOSUID | MS_NODEV | MS_NOEXEC | MS_NOATIME,
+//                           "size=64k,nr_inodes=16,mode=755"), "Failed to mount sandbox-dev");
 
-        mknod_mount_dev("dev/zero");
-        mknod_mount_dev("dev/null");
-        mknod_mount_dev("dev/random");
-        mknod_mount_dev("dev/urandom");
-        mknod_mount_dev("dev/mqueue");
-        check_result(mkdir("dev/shm", 0755), "Failed to make shm dir");
+//        mknod_mount_dev("dev/zero");
+//        mknod_mount_dev("dev/null");
+//        mknod_mount_dev("dev/random");
+//        mknod_mount_dev("dev/urandom");
+//        mknod_mount_dev("dev/mqueue");
+//        check_result(mkdir("dev/shm", 0755), "Failed to make shm dir");
 
         std::string tmp_old_root = "/old_root";
         std::string tmp_old_root_dir = args.image_path + tmp_old_root;
@@ -258,6 +257,7 @@ int container_main(void *container_main_args_ptr) {
         check_result(mount(args.image_path.c_str(), args.image_path.c_str(), "bind", MS_BIND | MS_REC, NULL), "Mount image_path");
         check_result(syscall(SYS_pivot_root, args.image_path.c_str(), tmp_old_root_dir.c_str()), "Change root dir");
         check_result(umount2(tmp_old_root.c_str(), MNT_DETACH), "Umount old root");
+
 
 
         /*Setup hostname**************************/
@@ -281,9 +281,10 @@ int container_main(void *container_main_args_ptr) {
         umask(0);
 
         if (args.daemonize) {
-           freopen("/dev/null", "r", stdin);
-           freopen("/dev/null", "w", stdout);
-           freopen("/dev/null", "w", stderr);
+            freopen("/dev/null", "r", stdin);
+            freopen("/dev/null", "w", stdout);
+            freopen("/dev/null", "w", stderr);
+            check_result(setsid(), "Failed to create new session and precess group");
         }
 
 
@@ -361,7 +362,7 @@ int aucont_start(start_arguments const &args) {
 
         /*Create cpu cgroup***************************/
         std::string const current_cpu_dir = CPU_CGROUP_DIR + "/" + std::to_string(pid);
-        exec_check_result("mkdir -p " + current_cpu_dir);
+        exec_check_result("sudo mkdir -m 755 -p " + current_cpu_dir);
 
 
         /*Setup CPU limit*************************/
@@ -373,9 +374,9 @@ int aucont_start(start_arguments const &args) {
             printDebug() << "Cpus count is " << cpus_count << std::endl;
             printDebug() << "Cpus quota is " << cpu_quota << '/' << CPU_PERIOD_US << std::endl;
         }
-        exec_check_result("echo " + std::to_string(CPU_PERIOD_US) +  " >> " + current_cpu_dir + "/cpu.cfs_period_us");
-        exec_check_result("echo " + std::to_string(cpu_quota) +  " >> " + current_cpu_dir + "/cpu.cfs_quota_us");
-        exec_check_result("echo " + pid_str +  " >> " + current_cpu_dir + "/tasks");
+        exec_check_result("echo " + std::to_string(CPU_PERIOD_US) +  " | sudo tee " + current_cpu_dir + "/cpu.cfs_period_us > /dev/null");
+        exec_check_result("echo " + std::to_string(cpu_quota) +  " | sudo tee " + current_cpu_dir + "/cpu.cfs_quota_us > /dev/null");
+        exec_check_result("echo " + pid_str +  " | sudo tee " + current_cpu_dir + "/tasks > /dev/null");
 
 
         /*Setup networking************************/
@@ -505,12 +506,13 @@ int aucont_exec(exec_arguments const &args) {
         /*Enter to container's CPU cgroup*************/
         std::string tasks_path = CPU_CGROUP_DIR + "/" + pid_str + "/tasks";
         std::string cur_pid_str = std::to_string(getpid());
-        exec_check_result("echo " + cur_pid_str + " >> " + tasks_path);
+        exec_check_result("echo " + cur_pid_str + " | sudo tee " + tasks_path + " > /dev/null");
 
 
         /*Change work dir ************************/
         int fd = check_result(open(("/proc/" + pid_str + "/" + "root").c_str(), O_RDONLY), "Failed to open container root dir");
         check_result(fchdir(fd), "Failed to change work dir", [](int err) {return !err;});
+        close(fd);
 
 
         /*Enter to container's ns*****************/
