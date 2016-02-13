@@ -365,7 +365,7 @@ int aucont_start(start_arguments const &args) {
 
 
         /*Setup CPU limit*************************/
-        static long const CPU_PERIOD_US = 50000;
+        static long const CPU_PERIOD_US = 1000 * 1000; // 1sec
         static long const CPU_QUOTA_PER_PERCENT = CPU_PERIOD_US / 100;
         long cpus_count = sysconf(_SC_NPROCESSORS_ONLN);
         long cpu_quota = CPU_QUOTA_PER_PERCENT * args.cpu_limit * cpus_count;
